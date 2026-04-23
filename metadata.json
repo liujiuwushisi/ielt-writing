@@ -1,0 +1,10 @@
+{
+  "name": "IELTS Writing Pro",
+  "description": "A professional IELTS writing practice platform focusing on authentic expressions for Task 1 and Task 2 themes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "AI-powered essay analysis",
+    "Thematic vocabulary bank",
+    "Realistic writing environment"
+  ]
+}
