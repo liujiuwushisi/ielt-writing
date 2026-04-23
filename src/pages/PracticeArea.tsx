@@ -28,32 +28,87 @@ interface PracticeItem {
   type: 'expression' | 'claim' | 'support' | 'example';
   content: string;
   translation: string;
+  literal: string; // 新增：逐字翻译
   label: string;
   focus?: string[];
 }
 
 /**
- * Simple word-level diffing logic
+ * Advanced Diffing Logic
+ * 1. Bag of words: If a word exists in the reference, it's correct.
+ * 2. Character-level diff: If a word is close to a reference word, highlight mismatched letters.
  */
+function clean(word: string) {
+  return word.replace(/[.,/#!$%^&*;:{}=\-_`~()]/g, "").toLowerCase().trim();
+}
+
+/**
+ * Simple character diff helper
+ */
+function getCharDiff(reference: string, input: string) {
+  const chars = [];
+  const maxLen = Math.max(reference.length, input.length);
+  for (let i = 0; i < maxLen; i++) {
+    const r = reference[i] || "";
+    const inChar = input[i] || "";
+    chars.push({
+      char: inChar || r,
+      isCorrect: r.toLowerCase() === inChar.toLowerCase(),
+      isInput: !!inChar,
+      isRef: !!r
+    });
+  }
+  return chars;
+}
+
 function diffSentences(reference: string, input: string) {
   const refWords = reference.trim().split(/\s+/);
   const inputWords = input.trim().split(/\s+/);
   
-  // This is a simple visual diff, not a full LCS algorithm
-  // For better results in production, a library like 'diff' would be used
-  return refWords.map((word, i) => {
-    const inputWord = inputWords[i] || "";
-    // Clean words for comparison (remove punctuation, lower case)
-    const cleanRef = word.replace(/[.,/#!$%^&*;:{}=\-_`~()]/g, "").toLowerCase();
-    const cleanInput = inputWord.replace(/[.,/#!$%^&*;:{}=\-_`~()]/g, "").toLowerCase();
-    
-    return {
-      original: word,
-      input: inputWord,
-      isCorrect: cleanRef === cleanInput,
-      isMissing: !inputWord && inputWords.length <= i,
-    };
-  });
+  const refCleaned = refWords.map(w => ({ original: w, cleaned: clean(w), used: false }));
+  
+  const analyzedInput = inputWords.map(inWord => {
+    const inCleaned = clean(inWord);
+    if (!inCleaned) return null;
+
+    // 1. Check exact match in "bag"
+    const exactMatchIdx = refCleaned.findIndex(r => r.cleaned === inCleaned && !r.used);
+    if (exactMatchIdx !== -1) {
+      refCleaned[exactMatchIdx].used = true;
+      return { type: 'correct', word: inWord, original: refCleaned[exactMatchIdx].original };
+    }
+
+    // 2. Check for "close" match (fuzzy) - simple heuristic: more than 60% chars same
+    const closeMatchIdx = refCleaned.findIndex(r => {
+      if (r.used) return false;
+      const r_c = r.cleaned;
+      if (Math.abs(r_c.length - inCleaned.length) > 3) return false;
+      let matches = 0;
+      for (let i = 0; i < Math.min(r_c.length, inCleaned.length); i++) {
+        if (r_c[i] === inCleaned[i]) matches++;
+      }
+      return matches / Math.max(r_c.length, inCleaned.length) > 0.5;
+    });
+
+    if (closeMatchIdx !== -1) {
+      refCleaned[closeMatchIdx].used = true;
+      const refWord = refCleaned[closeMatchIdx].original;
+      return { 
+        type: 'misspelled', 
+        word: inWord, 
+        original: refWord,
+        charDiff: getCharDiff(refWord, inWord)
+      };
+    }
+
+    // 3. Extra word
+    return { type: 'extra', word: inWord };
+  }).filter(Boolean);
+
+  // 4. Missing words
+  const missing = refCleaned.filter(r => !r.used).map(r => r.original);
+
+  return { analyzedInput, missing };
 }
 
 export default function PracticeArea() {
@@ -74,34 +129,38 @@ export default function PracticeArea() {
 
   // Flatten all practice items: Expressions Examples + Argument Model Sentences
   const practiceItems: PracticeItem[] = useMemo(() => [
-    // Expression target sentences
+    // Expression target sentences (Example sentences translated word-for-word)
     ...theme.expressions.map(exp => ({
       type: 'expression' as const,
       content: exp.example,
       translation: exp.meaning,
+      literal: exp.literal, 
       label: `Lexical Use: ${exp.phrase}`,
       focus: [exp.phrase]
     })),
-    // Argument model sentences
+    // Argument model bridge sentences
     ...(theme.arguments || []).flatMap(arg => ([
       {
         type: 'claim' as const,
-        content: arg.models.claim,
+        content: arg.models.claim.text,
         translation: arg.claimZh,
+        literal: arg.models.claim.literal,
         label: "Thesis / Claim",
         focus: arg.targetVocab
       },
       {
         type: 'support' as const,
-        content: arg.models.support,
-        translation: "Logical Reasoning / Support",
+        content: arg.models.support.text,
+        translation: "逻辑论证",
+        literal: arg.models.support.literal,
         label: "Logic & Development",
         focus: arg.targetVocab
       },
       {
         type: 'example' as const,
-        content: arg.models.example,
-        translation: "Evidence / Example",
+        content: arg.models.example.text,
+        translation: "例证说明",
+        literal: arg.models.example.literal,
         label: "Empirical Support",
         focus: arg.targetVocab
       }
@@ -138,7 +197,7 @@ export default function PracticeArea() {
   };
 
   const diffResult = useMemo(() => {
-    if (!isChecked) return [];
+    if (!isChecked) return { analyzedInput: [], missing: [] };
     return diffSentences(currentItem.content, input);
   }, [isChecked, currentItem.content, input]);
 
@@ -167,8 +226,8 @@ export default function PracticeArea() {
               <span className="text-[10px] font-black uppercase tracking-widest opacity-40 italic">Global Progress</span>
               <div className="flex gap-1 mt-1">
                 {practiceItems.map((_, idx) => (
-                  <div key={idx} className={cn(
-                    "w-1.5 h-1.5 border border-[#1A1A1A]/20 transition-all cursor-pointer",
+                  <button key={idx} className={cn(
+                    "w-1.5 h-1.5 border border-[#1A1A1A]/20 transition-all cursor-pointer outline-none",
                     currentIndex === idx ? "bg-[#FF5F1F] scale-125 shadow-lg" : 
                     completedItems.includes(idx) ? "bg-[#1A1A1A]" : "bg-transparent"
                   )} onClick={() => { setCurrentIndex(idx); resetState(); }} />
@@ -183,7 +242,7 @@ export default function PracticeArea() {
 
       <main className="flex-1 flex overflow-hidden">
         {/* Left: Model & Translation */}
-        <div className="w-1/2 p-20 border-r border-[#1A1A1A]/10 overflow-y-auto space-y-12">
+        <div className="w-1/2 p-20 border-r border-[#1A1A1A]/10 overflow-y-auto space-y-12 bg-[#F9F7F2]">
           <div className="space-y-4">
              <div className="flex items-center justify-between">
                 <span className="text-[10px] font-black uppercase tracking-[0.3em] bg-[#1A1A1A] text-[#F4F1EA] px-3 py-1 italic">
@@ -202,28 +261,35 @@ export default function PracticeArea() {
                       initial={{ opacity: 0, y: 10 }}
                       animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0, y: -10 }}
-                      className="space-y-8"
+                      className="space-y-12"
                     >
-                      <p className="text-5xl font-serif italic leading-tight text-[#1A1A1A]">
-                        "{currentItem.content}"
-                      </p>
-                      <div className="h-px bg-[#1A1A1A]/10 w-24" />
-                      <p className="text-xl font-medium text-[#1A1A1A]/60 leading-relaxed border-l-4 border-[#FF5F1F] pl-6 italic">
-                        {currentItem.translation}
-                      </p>
+                      <div className="space-y-2">
+                        <span className="text-[10px] font-bold uppercase tracking-widest text-[#FF5F1F] block">English Model</span>
+                        <p className="text-4xl font-semibold leading-tight text-[#1A1A1A] font-sans">
+                          {currentItem.content}
+                        </p>
+                      </div>
+                      <div className="space-y-2">
+                        <span className="text-[10px] font-bold uppercase tracking-widest text-[#1A1A1A]/40 block text-right">中文逐字对译</span>
+                        <p className="text-2xl font-medium text-[#1A1A1A]/70 leading-relaxed border-r-4 border-[#1A1A1A]/10 pr-6 text-right font-sans">
+                          {currentItem.literal}
+                        </p>
+                      </div>
                     </motion.div>
                   ) : (
                     <motion.div
                       key="hidden"
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
-                      className="h-[300px] flex flex-col items-center justify-center border-4 border-dashed border-[#1A1A1A]/10 bg-white/30 rounded-3xl"
+                      className="min-h-[400px] flex flex-col items-center justify-center border-4 border-dashed border-[#1A1A1A]/10 bg-white/30 rounded-3xl p-12 text-center"
                     >
-                      <EyeOff className="w-12 h-12 mb-4 opacity-10" />
-                      <p className="text-[10px] font-black uppercase tracking-[0.4em] opacity-40">Observation Disabled</p>
-                      <p className="text-sm font-serif italic mt-4 opacity-80 decoration-[#FF5F1F] underline underline-offset-8">
-                        {currentItem.translation}
-                      </p>
+                      <EyeOff className="w-8 h-8 mb-6 opacity-10" />
+                      <div className="space-y-4 max-w-lg">
+                        <span className="text-[10px] font-black uppercase tracking-[0.4em] opacity-30 block">Literal Recall Mode</span>
+                        <p className="text-4xl font-bold leading-relaxed text-[#1A1A1A] font-sans">
+                          {currentItem.literal}
+                        </p>
+                      </div>
                     </motion.div>
                   )}
                 </AnimatePresence>
@@ -235,7 +301,7 @@ export default function PracticeArea() {
                <h4 className="text-[10px] font-black uppercase tracking-widest opacity-40">Lexical Core</h4>
                <div className="flex flex-wrap gap-2">
                  {currentItem.focus.map(f => (
-                   <span key={f} className="text-sm font-serif italic font-bold border-b-2 border-[#FF5F1F] pb-1">{f}</span>
+                   <span key={f} className="text-sm font-bold border-b-2 border-[#FF5F1F] pb-1">{f}</span>
                  ))}
                </div>
             </div>
@@ -272,38 +338,67 @@ export default function PracticeArea() {
               onChange={(e) => setInput(e.target.value)}
               disabled={showModel || isChecked}
               placeholder={showModel ? "Hide the material on the left to activate writing..." : "Type from memory..."}
-              className="w-full h-full p-12 bg-transparent text-4xl font-serif italic leading-relaxed focus:outline-none resize-none disabled:opacity-30 placeholder:opacity-10"
+              className="w-full h-full p-12 bg-transparent text-4xl font-sans font-medium leading-relaxed focus:outline-none resize-none disabled:opacity-30 placeholder:opacity-10 border border-transparent"
             />
             
             <AnimatePresence>
               {isChecked && (
                 <motion.div 
                   initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                  className="absolute inset-0 p-12 bg-[#F4F1EA]/98 overflow-y-auto"
+                  className="absolute inset-0 p-12 bg-white/98 overflow-y-auto"
                 >
-                    <div className="space-y-12">
+                    <div className="space-y-16">
                       <div>
-                        <span className="text-[10px] font-black uppercase text-[#FF5F1F] mb-4 block tracking-widest">Comparative Analysis</span>
-                        <div className="text-3xl font-serif italic leading-relaxed flex flex-wrap gap-x-3 gap-y-4">
-                          {diffResult.map((word, idx) => (
-                            <span key={idx} className="relative group">
-                              {word.isCorrect ? (
-                                <span className="text-[#1A1A1A]">{word.original}</span>
+                        <span className="text-[10px] font-black uppercase text-[#FF5F1F] mb-6 block tracking-widest">Precision Audit & Correction</span>
+                        <div className="flex flex-wrap gap-x-4 gap-y-10 text-3xl font-medium leading-relaxed font-sans">
+                          {diffResult.analyzedInput.map((item, idx) => (
+                            <div key={idx} className="flex flex-col">
+                              {item.type === 'correct' ? (
+                                <span className="text-[#1A1A1A]">{item.word}</span>
+                              ) : item.type === 'misspelled' ? (
+                                <div className="flex flex-col group relative">
+                                  {/* User Misspelled */}
+                                  <div className="flex">
+                                    {(item.charDiff || []).map((c, i) => (
+                                      <span key={i} className={cn(
+                                        c.isCorrect ? "text-[#1A1A1A]/20" : "text-red-500 underline underline-offset-4 decoration-2"
+                                      )}>{c.char}</span>
+                                    ))}
+                                  </div>
+                                  {/* Correct Version */}
+                                  <span className="text-green-600 font-bold border-b-2 border-green-200">{item.original}</span>
+                                </div>
                               ) : (
-                                <span className="flex flex-col">
-                                  <span className="text-red-500 line-through decoration-2 opacity-60">{word.input || "___"}</span>
-                                  <span className="text-[#1A1A1A] border-b-2 border-green-500 font-bold">{word.original}</span>
-                                </span>
+                                <span className="text-red-300 line-through opacity-40">{item.word}</span>
                               )}
-                            </span>
+                            </div>
+                          ))}
+                          {diffResult.missing.map((word, idx) => (
+                            <div key={`miss-${idx}`} className="flex flex-col opacity-50 border-2 border-dashed border-[#FF5F1F]/20 px-2 rounded">
+                               <span className="text-[8px] font-black text-[#FF5F1F] uppercase tracking-tighter">Missing</span>
+                               <span className="text-[#FF5F1F] font-bold">{word}</span>
+                            </div>
                           ))}
                         </div>
                       </div>
                       
-                      <div className="pt-8 border-t border-[#1A1A1A]/10">
-                        <div className="flex items-center gap-4 text-[10px] font-black uppercase opacity-40 tracking-widest">
-                           <CheckCircle2 className="w-4 h-4 text-green-500" /> Accuracy Status: {diffResult.filter(w => w.isCorrect).length}/{diffResult.length} Words matched
-                        </div>
+                      <div className="pt-8 border-t border-[#1A1A1A]/10 grid grid-cols-2 gap-8">
+                         <div className="space-y-2">
+                           <span className="text-[9px] font-black uppercase opacity-30">Dictionary Strategy</span>
+                           <p className="text-xs text-[#1A1A1A]/50 italic leading-relaxed">
+                             "Bag of Words" mode activated. Ordering is secondary; focus on capturing the correct lexical elements and structures.
+                           </p>
+                         </div>
+                         <div className="flex items-center justify-end gap-3 text-[10px] font-black uppercase text-[#1A1A1A]">
+                            <div className="flex items-center gap-1.5 px-3 py-1 bg-green-50 rounded-full border border-green-200">
+                               <CheckCircle2 className="w-3 h-3 text-green-500" />
+                               {diffResult.analyzedInput.filter(i => i.type === 'correct').length} Perfect
+                            </div>
+                            <div className="flex items-center gap-1.5 px-3 py-1 bg-orange-50 rounded-full border border-orange-200">
+                               <ListRestart className="w-3 h-3 text-orange-400" />
+                               {diffResult.analyzedInput.filter(i => i.type === 'misspelled').length} Fixable
+                            </div>
+                         </div>
                       </div>
                     </div>
                 </motion.div>
@@ -393,11 +488,11 @@ export default function PracticeArea() {
                             </span>
                             {completedItems.includes(idx) && <CheckCircle2 className="w-3 h-3 text-green-600" />}
                           </div>
-                          <p className="text-xl font-serif text-[#1A1A1A] leading-snug">
+                          <p className="text-xl font-sans text-[#1A1A1A] leading-snug">
                             {item.content}
                           </p>
-                          <p className="text-sm text-[#1A1A1A]/40">
-                            {item.translation}
+                          <p className="text-sm text-[#1A1A1A]/40 font-sans">
+                            {item.literal}
                           </p>
                         </div>
                       </div>
